@@ -1,0 +1,23 @@
+{
+  "name": "Snapbill — Invoicing made simple",
+  "short_name": "Snapbill",
+  "description": "Create professional invoices, track payments, save customers and packages, and understand your business.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b1020",
+  "theme_color": "#4F46E5",
+  "categories": ["business", "finance", "productivity"],
+  "icons": [
+    { "src": "./assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "./assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "./assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "./assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "New invoice", "url": "./index.html#/invoices/new" },
+    { "name": "Customers", "url": "./index.html#/customers" },
+    { "name": "Analytics", "url": "./index.html#/analytics" }
+  ]
+}
