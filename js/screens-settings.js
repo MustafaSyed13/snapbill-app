@@ -54,8 +54,8 @@ export async function moreScreen() {
       toggle(getTheme() === 'dark', on => { setTheme(on ? 'dark' : 'light'); themeIcoHost.innerHTML = ''; themeIcoHost.appendChild(icon(on ? 'moon' : 'sun', 18)); })),
   ));
 
-  host.appendChild(h('button', { class: 'btn btn-ghost btn-block danger', onclick: async () => { if (await confirmDialog({ title: 'Sign out?', message: 'You can sign back in any time. Your data stays on this device.', confirmText: 'Sign out' })) { clearSession(); state.set({ account: null, business: null }); navigate('/welcome'); } } }, icon('logout', 18), 'Sign out'));
-  host.appendChild(h('div', { class: 'muted small center pad' }, 'Snapbill · v1.0 · Data stored on this device'));
+  host.appendChild(h('button', { class: 'btn btn-ghost btn-block danger', onclick: async () => { if (await confirmDialog({ title: 'Sign out?', message: 'You can sign back in any time from any device — your data is saved securely in the cloud.', confirmText: 'Sign out' })) { await clearSession(); state.set({ account: null, business: null }); navigate('/welcome'); } } }, icon('logout', 18), 'Sign out'));
+  host.appendChild(h('div', { class: 'muted small center pad' }, 'Snapbill · v1.0 · Data stored securely in the cloud'));
   host.appendChild(h('div', { class: 'bottom-pad' }));
   return host;
 }
@@ -162,16 +162,16 @@ export async function accountScreen() {
 }
 
 async function deleteFlow() {
-  const first = await confirmDialog({ title: 'Delete everything?', message: 'This permanently removes your account and all business data on this device. This cannot be undone.', confirmText: 'Continue', danger: true });
+  const first = await confirmDialog({ title: 'Delete everything?', message: 'This permanently removes all your business data (invoices, customers, products, packages) from the cloud database. This cannot be undone.', confirmText: 'Continue', danger: true });
   if (!first) return;
   // export offer
   const doExport = await confirmDialog({ title: 'Download a backup first?', message: 'We recommend exporting your data before deleting.', confirmText: 'Yes, download backup' });
   if (doExport) await downloadBackup();
-  const second = await confirmDialog({ title: 'Final confirmation', message: 'Type-safe check: really delete your account now?', confirmText: 'Delete forever', danger: true });
+  const second = await confirmDialog({ title: 'Final confirmation', message: 'Really delete all your business data now?', confirmText: 'Delete forever', danger: true });
   if (!second) return;
   await deleteAccountData(state.account.id);
-  clearSession(); state.set({ account: null, business: null });
-  toast('Account deleted', 'success');
+  await clearSession(); state.set({ account: null, business: null });
+  toast('Your data has been deleted', 'success');
   navigate('/welcome');
 }
 
@@ -300,12 +300,12 @@ export function helpScreen() {
     h('div', { class: 'help-step' }, h('strong', {}, 'Desktop (Chrome/Edge):'), h('p', { class: 'muted small' }, 'Click the install icon in the address bar, or use the browser menu → "Install Snapbill".')),
   ));
   host.appendChild(h('div', { class: 'card help-card' },
-    h('h3', {}, '💾 Where is my data?'),
-    h('p', { class: 'muted small' }, 'Your data is stored securely on this device using your browser\'s database, isolated per account. It works offline. To move to another device, use Export & backup, then Restore on the new device. (Optional cloud sync can be enabled in a production upgrade — see the project README.)'),
+    h('h3', {}, '☁️ Where is my data?'),
+    h('p', { class: 'muted small' }, 'Your data is stored securely in the cloud (Supabase), isolated per account with database-level access rules — sign in from your phone, tablet, or computer and see the same invoices, customers, and payments everywhere. An internet connection is needed to load and save data.'),
   ));
   host.appendChild(h('div', { class: 'card help-card' },
     h('h3', {}, '🧠 Smart features'),
-    h('p', { class: 'muted small' }, 'The assistant, insights, and AI invoice drafting work offline using your own data. Connecting an optional AI key (Account settings) only improves phrasing — nothing breaks without it.'),
+    h('p', { class: 'muted small' }, 'The assistant, insights, and AI invoice drafting run on your own data using built-in rules and statistics — no external AI service required. Connecting an optional AI key (Account settings) only improves phrasing — nothing breaks without it.'),
   ));
   host.appendChild(h('div', { class: 'card help-card' },
     h('h3', {}, '🔒 Privacy'),

@@ -1,145 +1,212 @@
-// Snapbill data layer — IndexedDB storage, per-account isolation, auth, analytics.
-// Cloud-sync (Supabase) can be layered on top of the same repository API later.
+// Snapbill data layer — Supabase (Postgres + Auth) backend.
+// Real accounts, real multi-device sync, database-enforced per-account privacy
+// via Row Level Security (see supabase/schema.sql). The client library is
+// vendored locally and lazy-loaded so the app shell still boots instantly.
 
-const DB_NAME = 'snapbill';
-const DB_VERSION = 1;
-const STORES = ['accounts', 'business', 'customers', 'items', 'packages', 'invoices', 'payments', 'meta'];
+const SUPABASE_URL = 'https://pctgqjelrwxgwpkvnufu.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_zYAgLGF2BLQM0E7V8J6x8A_1GFju1HT';
 
-let _db = null;
+let _client = null;
+let _clientPromise = null;
 
-export function openDB() {
-  if (_db) return Promise.resolve(_db);
+function loadSupabaseLib() {
+  if (window.supabase && window.supabase.createClient) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      for (const name of STORES) {
-        if (!db.objectStoreNames.contains(name)) {
-          const store = db.createObjectStore(name, { keyPath: 'id' });
-          if (name !== 'accounts' && name !== 'meta') store.createIndex('accountId', 'accountId', { unique: false });
-        }
-      }
-    };
-    req.onsuccess = () => { _db = req.result; resolve(_db); };
-    req.onerror = () => reject(req.error);
+    const s = document.createElement('script');
+    s.src = './js/vendor/supabase.min.js';
+    s.onload = resolve; s.onerror = () => reject(new Error('Could not reach the Snapbill backend. Check your internet connection.'));
+    document.head.appendChild(s);
   });
 }
 
-function tx(store, mode = 'readonly') {
-  return _db.transaction(store, mode).objectStore(store);
-}
-function reqP(request) {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function put(store, value) { await openDB(); await reqP(tx(store, 'readwrite').put(value)); return value; }
-export async function get(store, id) { await openDB(); return reqP(tx(store).get(id)); }
-export async function del(store, id) { await openDB(); return reqP(tx(store, 'readwrite').delete(id)); }
-export async function getAll(store) { await openDB(); return reqP(tx(store).getAll()); }
-
-export async function getAllByAccount(store, accountId) {
-  await openDB();
-  const idx = tx(store).index('accountId');
-  return reqP(idx.getAll(IDBKeyRange.only(accountId)));
+export async function openDB() {
+  if (_client) return _client;
+  if (!_clientPromise) {
+    _clientPromise = (async () => {
+      await loadSupabaseLib();
+      _client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      return _client;
+    })();
+  }
+  return _clientPromise;
 }
 
 export function uid(prefix = '') {
   return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-// ---------- Auth (PBKDF2 via Web Crypto) ----------
-const enc = new TextEncoder();
-async function pbkdf2(password, saltB64) {
-  const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
-  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 120000, hash: 'SHA-256' }, key, 256);
-  return btoa(String.fromCharCode(...new Uint8Array(bits)));
-}
-function randSaltB64() {
-  const s = crypto.getRandomValues(new Uint8Array(16));
-  return btoa(String.fromCharCode(...s));
-}
-export async function hashSecret(secret) {
-  const salt = randSaltB64();
-  const hash = await pbkdf2(secret, salt);
-  return { salt, hash };
-}
-export async function verifySecret(secret, salt, hash) {
-  const h = await pbkdf2(secret, salt);
-  return h === hash;
+function friendlyAuthError(error) {
+  const msg = error && error.message || 'Something went wrong.';
+  if (/invalid login credentials/i.test(msg)) return 'Incorrect email or password.';
+  if (/user already registered/i.test(msg)) return 'An account with this email already exists.';
+  if (/email not confirmed/i.test(msg)) return 'Please confirm your email (check your inbox) before signing in.';
+  return msg;
 }
 
-export async function findAccountByEmail(email) {
-  const all = await getAll('accounts');
-  return all.find(a => a.email.toLowerCase() === email.toLowerCase().trim());
+function toAccount(user) {
+  if (!user) return null;
+  return { id: user.id, email: user.email, ownerName: (user.user_metadata && user.user_metadata.owner_name) || '' };
 }
 
-export async function createAccount({ ownerName, email, password, securityQuestion, securityAnswer }) {
-  const existing = await findAccountByEmail(email);
-  if (existing) throw new Error('An account with this email already exists.');
-  const { salt, hash } = await hashSecret(password);
-  const sa = await hashSecret((securityAnswer || '').toLowerCase().trim());
-  const account = {
-    id: uid('acc_'), ownerName: ownerName.trim(), email: email.trim(),
-    salt, hash, securityQuestion: securityQuestion || 'What city were you born in?',
-    saSalt: sa.salt, saHash: sa.hash, createdAt: Date.now(),
-  };
-  await put('accounts', account);
-  return account;
+// ---------- Auth ----------
+export async function createAccount({ ownerName, email, password }) {
+  const client = await openDB();
+  const { data, error } = await client.auth.signUp({
+    email: email.trim(), password,
+    options: { data: { owner_name: ownerName.trim() } },
+  });
+  if (error) throw new Error(friendlyAuthError(error));
+  if (!data.session) {
+    const err = new Error('Account created — check your email to confirm it, then sign in.');
+    err.needsConfirmation = true;
+    throw err;
+  }
+  return toAccount(data.user);
 }
 
 export async function authenticate(email, password) {
-  const acc = await findAccountByEmail(email);
-  if (!acc) throw new Error('No account found for that email.');
-  const ok = await verifySecret(password, acc.salt, acc.hash);
-  if (!ok) throw new Error('Incorrect password.');
-  return acc;
+  const client = await openDB();
+  const { data, error } = await client.auth.signInWithPassword({ email: email.trim(), password });
+  if (error) throw new Error(friendlyAuthError(error));
+  return toAccount(data.user);
 }
 
-export async function resetPassword(email, securityAnswer, newPassword) {
-  const acc = await findAccountByEmail(email);
-  if (!acc) throw new Error('No account found for that email.');
-  const ok = await verifySecret((securityAnswer || '').toLowerCase().trim(), acc.saSalt, acc.saHash);
-  if (!ok) throw new Error('Security answer does not match.');
-  const { salt, hash } = await hashSecret(newPassword);
-  acc.salt = salt; acc.hash = hash;
-  await put('accounts', acc);
-  return acc;
+// Step 1 of password reset: sends a real email with a secure link.
+export async function requestPasswordReset(email) {
+  const client = await openDB();
+  const { error } = await client.auth.resetPasswordForEmail(email.trim(), { redirectTo: location.origin + location.pathname });
+  if (error) throw new Error(friendlyAuthError(error));
 }
 
-// ---------- Session ----------
-const SESSION_KEY = 'snapbill.session';
-export function setSession(accountId) { localStorage.setItem(SESSION_KEY, accountId); }
-export function getSession() { return localStorage.getItem(SESSION_KEY); }
-export function clearSession() { localStorage.removeItem(SESSION_KEY); }
+// Step 2: called after the user clicks the emailed link and lands back in a recovery session.
+export async function updatePassword(newPassword) {
+  const client = await openDB();
+  const { data, error } = await client.auth.updateUser({ password: newPassword });
+  if (error) throw new Error(friendlyAuthError(error));
+  return toAccount(data.user);
+}
+
+export async function getSession() {
+  const client = await openDB();
+  const { data } = await client.auth.getSession();
+  return data.session ? toAccount(data.session.user) : null;
+}
+
+export async function clearSession() {
+  const client = await openDB();
+  await client.auth.signOut();
+}
+
+// Fires on sign-in, sign-out, token refresh, and password-recovery link landings.
+export async function onAuthEvent(cb) {
+  const client = await openDB();
+  client.auth.onAuthStateChange((event, session) => cb(event, session ? toAccount(session.user) : null));
+}
+
+// ---------- Row <-> app-object field mapping (snake_case DB columns <-> camelCase JS) ----------
+function tsToIso(ts) { return ts ? new Date(ts).toISOString() : null; }
+function isoToTs(iso) { return iso ? new Date(iso).getTime() : null; }
+
+const MAPPERS = {
+  business: {
+    toRow: (o) => ({
+      user_id: o.accountId, business_name: o.businessName || '', owner_name: o.ownerName || '', type: o.type || '',
+      logo_data_url: o.logoDataUrl || '', email: o.email || '', phone: o.phone || '', address: o.address || '',
+      currency: o.currency || 'USD', tax_label: o.taxLabel || 'Sales Tax', tax_rate: o.taxRate ?? 0, tax_inclusive: !!o.taxInclusive,
+      numbering_prefix: o.numberingPrefix || 'INV-', next_number: o.nextNumber || 1001,
+      payment_instructions: o.paymentInstructions || '', payment_terms: o.paymentTerms || 14,
+      default_notes: o.defaultNotes || '', default_terms: o.defaultTerms || '', accent: o.accent || '#4F46E5',
+    }),
+    fromRow: (r) => !r ? null : ({
+      id: r.id, accountId: r.user_id, businessName: r.business_name, ownerName: r.owner_name, type: r.type,
+      logoDataUrl: r.logo_data_url, email: r.email, phone: r.phone, address: r.address, currency: r.currency,
+      taxLabel: r.tax_label, taxRate: Number(r.tax_rate), taxInclusive: r.tax_inclusive, numberingPrefix: r.numbering_prefix,
+      nextNumber: r.next_number, paymentInstructions: r.payment_instructions, paymentTerms: r.payment_terms,
+      defaultNotes: r.default_notes, defaultTerms: r.default_terms, accent: r.accent,
+      createdAt: isoToTs(r.created_at), updatedAt: isoToTs(r.updated_at),
+    }),
+  },
+  customers: {
+    toRow: (o) => ({ user_id: o.accountId, name: o.name || '', company: o.company || '', email: o.email || '', phone: o.phone || '', address: o.address || '', notes: o.notes || '' }),
+    fromRow: (r) => !r ? null : ({ id: r.id, accountId: r.user_id, name: r.name, company: r.company, email: r.email, phone: r.phone, address: r.address, notes: r.notes, createdAt: isoToTs(r.created_at), updatedAt: isoToTs(r.updated_at) }),
+  },
+  items: {
+    toRow: (o) => ({ user_id: o.accountId, name: o.name || '', category: o.category || '', description: o.description || '', price: o.price || 0, taxable: o.taxable !== false, unit: o.unit || 'each', type: o.type || 'service', notes: o.notes || '', image_data_url: o.imageDataUrl || '' }),
+    fromRow: (r) => !r ? null : ({ id: r.id, accountId: r.user_id, name: r.name, category: r.category, description: r.description, price: Number(r.price), taxable: r.taxable, unit: r.unit, type: r.type, notes: r.notes, imageDataUrl: r.image_data_url, createdAt: isoToTs(r.created_at), updatedAt: isoToTs(r.updated_at) }),
+  },
+  packages: {
+    toRow: (o) => ({ user_id: o.accountId, name: o.name || '', description: o.description || '', price: (o.price === '' || o.price == null) ? null : o.price, items: o.items || [] }),
+    fromRow: (r) => !r ? null : ({ id: r.id, accountId: r.user_id, name: r.name, description: r.description, price: r.price == null ? '' : Number(r.price), items: r.items || [], createdAt: isoToTs(r.created_at), updatedAt: isoToTs(r.updated_at) }),
+  },
+  invoices: {
+    toRow: (o) => ({
+      user_id: o.accountId, number: o.number || '', customer_id: o.customerId || null, customer_snapshot: o.customerSnapshot || {},
+      issue_date: tsToIso(o.issueDate), due_date: tsToIso(o.dueDate), line_items: o.lineItems || [],
+      tax_rate: o.taxRate ?? 0, tax_inclusive: !!o.taxInclusive, discount_type: o.discountType || 'none', discount_value: o.discountValue || 0,
+      deposit_requested: o.depositRequested || 0, currency: o.currency || 'USD', notes: o.notes || '', terms: o.terms || '', status: o.status || 'draft',
+    }),
+    fromRow: (r) => !r ? null : ({
+      id: r.id, accountId: r.user_id, number: r.number, customerId: r.customer_id, customerSnapshot: r.customer_snapshot || {},
+      issueDate: isoToTs(r.issue_date), dueDate: isoToTs(r.due_date), lineItems: r.line_items || [],
+      taxRate: Number(r.tax_rate), taxInclusive: r.tax_inclusive, discountType: r.discount_type, discountValue: Number(r.discount_value),
+      depositRequested: Number(r.deposit_requested), currency: r.currency, notes: r.notes, terms: r.terms, status: r.status,
+      createdAt: isoToTs(r.created_at), updatedAt: isoToTs(r.updated_at),
+    }),
+  },
+  payments: {
+    toRow: (o) => ({ user_id: o.accountId, invoice_id: o.invoiceId, amount: o.amount, method: o.method || 'Other', date: tsToIso(o.date || Date.now()), note: o.note || '' }),
+    fromRow: (r) => !r ? null : ({ id: r.id, accountId: r.user_id, invoiceId: r.invoice_id, amount: Number(r.amount), method: r.method, date: isoToTs(r.date), note: r.note, createdAt: isoToTs(r.created_at) }),
+  },
+};
 
 // ---------- Business profile ----------
 export async function getBusiness(accountId) {
-  const all = await getAllByAccount('business', accountId);
-  return all[0] || null;
+  const client = await openDB();
+  const { data, error } = await client.from('business').select('*').eq('user_id', accountId).maybeSingle();
+  if (error) throw new Error(error.message);
+  return MAPPERS.business.fromRow(data);
 }
 export async function saveBusiness(profile) {
-  if (!profile.id) profile.id = uid('biz_');
-  profile.updatedAt = Date.now();
-  return put('business', profile);
+  const client = await openDB();
+  const row = MAPPERS.business.toRow(profile);
+  const { data, error } = await client.from('business').upsert(row, { onConflict: 'user_id' }).select().single();
+  if (error) throw new Error(error.message);
+  return MAPPERS.business.fromRow(data);
 }
 
 // ---------- Generic scoped repositories ----------
-export function repo(store) {
+export function repo(table) {
+  const M = MAPPERS[table];
   return {
-    list: (accountId) => getAllByAccount(store, accountId),
-    get: (id) => get(store, id),
-    save: async (rec, accountId) => {
-      if (!rec.id) rec.id = uid(store.slice(0, 3) + '_');
-      if (accountId) rec.accountId = accountId;
-      rec.updatedAt = Date.now();
-      if (!rec.createdAt) rec.createdAt = Date.now();
-      return put(store, rec);
+    list: async (accountId) => {
+      const client = await openDB();
+      const { data, error } = await client.from(table).select('*').eq('user_id', accountId).order('created_at', { ascending: false });
+      if (error) throw new Error(error.message);
+      return (data || []).map(M.fromRow);
     },
-    remove: (id) => del(store, id),
+    get: async (id) => {
+      const client = await openDB();
+      const { data, error } = await client.from(table).select('*').eq('id', id).maybeSingle();
+      if (error) throw new Error(error.message);
+      return M.fromRow(data);
+    },
+    save: async (rec, accountId) => {
+      const client = await openDB();
+      const row = M.toRow({ ...rec, accountId: accountId || rec.accountId });
+      if (rec.id) {
+        const { data, error } = await client.from(table).update(row).eq('id', rec.id).select().single();
+        if (error) throw new Error(error.message);
+        return M.fromRow(data);
+      }
+      const { data, error } = await client.from(table).insert(row).select().single();
+      if (error) throw new Error(error.message);
+      return M.fromRow(data);
+    },
+    remove: async (id) => {
+      const client = await openDB();
+      const { error } = await client.from(table).delete().eq('id', id);
+      if (error) throw new Error(error.message);
+    },
   };
 }
 
@@ -149,22 +216,28 @@ export const Packages = repo('packages');
 export const Invoices = repo('invoices');
 export const Payments = repo('payments');
 
-// ---------- Account deletion / export ----------
+// ---------- Export / account deletion ----------
 export async function exportAccountData(accountId) {
   const [business, customers, items, packages, invoices, payments] = await Promise.all([
     getBusiness(accountId), Customers.list(accountId), Items.list(accountId),
     Packages.list(accountId), Invoices.list(accountId), Payments.list(accountId),
   ]);
-  const acc = await get('accounts', accountId);
-  const safeAccount = acc ? { id: acc.id, ownerName: acc.ownerName, email: acc.email, createdAt: acc.createdAt } : null;
+  const client = await openDB();
+  const { data } = await client.auth.getUser();
+  const user = data && data.user;
+  const safeAccount = user ? { id: user.id, email: user.email, ownerName: (user.user_metadata || {}).owner_name || '' } : null;
   return { exportedAt: new Date().toISOString(), app: 'Snapbill', account: safeAccount, business, customers, items, packages, invoices, payments };
 }
 
+// Wipes all of the signed-in user's business data and signs them out. Note: fully
+// deleting the underlying login (auth.users row) requires elevated (service_role)
+// access that the browser's public key intentionally cannot have — that row can be
+// removed from the Supabase Dashboard (Authentication -> Users) if ever needed.
 export async function deleteAccountData(accountId) {
-  const stores = ['business', 'customers', 'items', 'packages', 'invoices', 'payments'];
-  for (const s of stores) {
-    const recs = await getAllByAccount(s, accountId);
-    for (const r of recs) await del(s, r.id);
+  const client = await openDB();
+  const tables = ['payments', 'invoices', 'packages', 'items', 'customers', 'business'];
+  for (const t of tables) {
+    const { error } = await client.from(t).delete().eq('user_id', accountId);
+    if (error) throw new Error(error.message);
   }
-  await del('accounts', accountId);
 }

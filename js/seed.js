@@ -1,5 +1,5 @@
 // Seeds a realistic demo account so the dashboard and analytics are populated on first run.
-import { createAccount, saveBusiness, Customers, Items, Packages, Invoices, Payments, findAccountByEmail, uid } from './db.js';
+import { createAccount, authenticate, saveBusiness, Customers, Items, Packages, Invoices, Payments, uid } from './db.js';
 
 export const DEMO_EMAIL = 'demo@snapbill.app';
 export const DEMO_PASSWORD = 'demo1234';
@@ -8,14 +8,17 @@ function daysAgo(n) { const d = new Date(); d.setDate(d.getDate() - n); d.setHou
 function daysFromNow(n) { return daysAgo(-n); }
 
 export async function ensureDemoAccount() {
-  const existing = await findAccountByEmail(DEMO_EMAIL);
-  if (existing) return existing;
-
-  const acc = await createAccount({
-    ownerName: 'Alex Rivera', email: DEMO_EMAIL, password: DEMO_PASSWORD,
-    securityQuestion: 'What city were you born in?', securityAnswer: 'demo',
-  });
+  let acc;
+  try {
+    acc = await authenticate(DEMO_EMAIL, DEMO_PASSWORD);
+  } catch {
+    acc = await createAccount({ ownerName: 'Alex Rivera', email: DEMO_EMAIL, password: DEMO_PASSWORD });
+  }
   const aid = acc.id;
+
+  // Already seeded on a previous run (or by another visitor) — reuse it as-is.
+  const existingCustomers = await Customers.list(aid);
+  if (existingCustomers.length > 0) return acc;
 
   await saveBusiness({
     accountId: aid, businessName: 'Rivera Studio', type: 'Design & Web Services',

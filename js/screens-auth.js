@@ -1,7 +1,7 @@
 // Auth & onboarding screens: welcome, register, login, recover, business setup.
 import { h, icon, navigate, state, toast, frag } from './lib.js';
 import { fieldRow, textInput, textArea, selectInput, pageHeader } from './screens-common.js';
-import { createAccount, authenticate, resetPassword, setSession, findAccountByEmail, getBusiness, saveBusiness } from './db.js';
+import { createAccount, authenticate, requestPasswordReset, updatePassword, getBusiness, saveBusiness } from './db.js';
 import { CURRENCIES } from './format.js';
 import { ensureDemoAccount, DEMO_EMAIL, DEMO_PASSWORD } from './seed.js';
 
@@ -19,7 +19,7 @@ export function welcomeScreen() {
         featureRow('invoice', 'Create polished invoices', 'Itemised charges, tax, discounts & your logo'),
         featureRow('wallet', 'Track every payment', 'Know exactly who owes you what'),
         featureRow('chart', 'Understand your business', 'Trends, top customers & smart insights'),
-        featureRow('cloudOff', 'Works offline', 'Draft anywhere — installs like a real app'),
+        featureRow('cloud', 'Synced across devices', 'Sign in anywhere — installs like a real app'),
       ),
     ),
     h('div', { class: 'auth-cta' },
@@ -39,7 +39,6 @@ async function tryDemo() {
   toast('Loading demo…', 'info', 1200);
   try {
     const acc = await ensureDemoAccount();
-    setSession(acc.id);
     state.set({ account: acc, business: await getBusiness(acc.id) });
     navigate('/');
     toast('Welcome to the Snapbill demo', 'success');
@@ -47,22 +46,24 @@ async function tryDemo() {
 }
 
 export function registerScreen() {
-  const form = { ownerName: '', email: '', password: '', confirm: '', securityAnswer: '' };
+  const form = { ownerName: '', email: '', password: '', confirm: '' };
   const err = h('div', { class: 'form-error' });
+  const info = h('div', { class: 'form-hint' });
   const submit = async () => {
-    err.textContent = '';
+    err.textContent = ''; info.textContent = '';
     if (!form.ownerName.trim()) return (err.textContent = 'Please enter your name.');
     if (!/^\S+@\S+\.\S+$/.test(form.email)) return (err.textContent = 'Please enter a valid email.');
     if (form.password.length < 6) return (err.textContent = 'Password must be at least 6 characters.');
     if (form.password !== form.confirm) return (err.textContent = 'Passwords do not match.');
-    if (!form.securityAnswer.trim()) return (err.textContent = 'Please answer the security question (for password reset).');
     try {
-      const acc = await createAccount({ ...form, securityQuestion: 'What city were you born in?' });
-      setSession(acc.id);
+      const acc = await createAccount(form);
       state.set({ account: acc, business: null });
       toast('Account created', 'success');
       navigate('/setup');
-    } catch (e) { err.textContent = e.message; }
+    } catch (e) {
+      if (e.needsConfirmation) info.textContent = e.message;
+      else err.textContent = e.message;
+    }
   };
   return h('div', { class: 'auth-screen scroll' },
     authTop('Create your account', 'Start invoicing in minutes — no credit card required.'),
@@ -71,8 +72,7 @@ export function registerScreen() {
       fieldRow('Email', textInput({ type: 'email', placeholder: 'you@business.com', oninput: e => (form.email = e.target.value) })),
       fieldRow('Password', textInput({ type: 'password', placeholder: 'At least 6 characters', oninput: e => (form.password = e.target.value) })),
       fieldRow('Confirm password', textInput({ type: 'password', placeholder: 'Re-enter password', oninput: e => (form.confirm = e.target.value) })),
-      fieldRow('Security answer', textInput({ placeholder: 'What city were you born in?', oninput: e => (form.securityAnswer = e.target.value) }), 'Used to reset your password if you forget it.'),
-      err,
+      err, info,
       h('button', { class: 'btn btn-primary btn-lg btn-block', onclick: submit }, 'Create account'),
       h('p', { class: 'auth-alt' }, 'Already have an account? ', h('a', { onclick: () => navigate('/login') }, 'Sign in')),
     ),
@@ -86,7 +86,6 @@ export function loginScreen() {
     err.textContent = '';
     try {
       const acc = await authenticate(form.email, form.password);
-      setSession(acc.id);
       const biz = await getBusiness(acc.id);
       state.set({ account: acc, business: biz });
       toast('Welcome back', 'success');
@@ -110,34 +109,56 @@ export function loginScreen() {
   );
 }
 async function submitDemo(err) {
-  try { const acc = await ensureDemoAccount(); setSession(acc.id); state.set({ account: acc, business: await getBusiness(acc.id) }); navigate('/'); toast('Demo loaded', 'success'); }
+  try { const acc = await ensureDemoAccount(); state.set({ account: acc, business: await getBusiness(acc.id) }); navigate('/'); toast('Demo loaded', 'success'); }
   catch (e) { err.textContent = e.message; }
 }
 
+// Step 1: request a real password-reset email.
 export function recoverScreen() {
-  const form = { email: '', answer: '', password: '' };
+  const form = { email: '' };
   const err = h('div', { class: 'form-error' });
   const info = h('div', { class: 'form-hint' });
   const submit = async () => {
     err.textContent = ''; info.textContent = '';
-    if (!form.email) return (err.textContent = 'Enter your account email.');
-    if (form.password.length < 6) return (err.textContent = 'New password must be at least 6 characters.');
+    if (!/^\S+@\S+\.\S+$/.test(form.email)) return (err.textContent = 'Enter your account email.');
     try {
-      await resetPassword(form.email, form.answer, form.password);
-      toast('Password updated — please sign in', 'success');
-      navigate('/login');
+      await requestPasswordReset(form.email);
+      info.textContent = 'Check your email for a password reset link.';
     } catch (e) { err.textContent = e.message; }
   };
   return h('div', { class: 'auth-screen scroll' },
-    authTop('Reset password', 'Answer your security question to set a new password.'),
+    authTop('Reset password', "Enter your account email and we'll send you a secure reset link."),
     h('div', { class: 'auth-form' },
       fieldRow('Account email', textInput({ type: 'email', placeholder: 'you@business.com', oninput: e => (form.email = e.target.value) })),
-      fieldRow('Security question', textInput({ value: 'What city were you born in?', disabled: true })),
-      fieldRow('Your answer', textInput({ placeholder: 'Answer', oninput: e => (form.answer = e.target.value) })),
-      fieldRow('New password', textInput({ type: 'password', placeholder: 'At least 6 characters', oninput: e => (form.password = e.target.value) })),
       err, info,
-      h('button', { class: 'btn btn-primary btn-lg btn-block', onclick: submit }, 'Update password'),
+      h('button', { class: 'btn btn-primary btn-lg btn-block', onclick: submit }, 'Send reset link'),
       h('p', { class: 'auth-alt' }, h('a', { onclick: () => navigate('/login') }, 'Back to sign in')),
+    ),
+  );
+}
+
+// Step 2: shown after the user clicks the emailed link and lands back with a
+// temporary recovery session (see app.js onAuthEvent handling for 'PASSWORD_RECOVERY').
+export function resetPasswordScreen() {
+  const form = { password: '', confirm: '' };
+  const err = h('div', { class: 'form-error' });
+  const submit = async () => {
+    err.textContent = '';
+    if (form.password.length < 6) return (err.textContent = 'Password must be at least 6 characters.');
+    if (form.password !== form.confirm) return (err.textContent = 'Passwords do not match.');
+    try {
+      await updatePassword(form.password);
+      toast('Password updated — you are signed in', 'success');
+      navigate('/');
+    } catch (e) { err.textContent = e.message; }
+  };
+  return h('div', { class: 'auth-screen scroll' },
+    authTop('Set a new password', 'You followed a secure reset link — choose a new password below.'),
+    h('div', { class: 'auth-form' },
+      fieldRow('New password', textInput({ type: 'password', placeholder: 'At least 6 characters', oninput: e => (form.password = e.target.value) })),
+      fieldRow('Confirm new password', textInput({ type: 'password', placeholder: 'Re-enter password', oninput: e => (form.confirm = e.target.value) })),
+      err,
+      h('button', { class: 'btn btn-primary btn-lg btn-block', onclick: submit }, 'Update password'),
     ),
   );
 }

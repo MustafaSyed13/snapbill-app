@@ -1,10 +1,10 @@
 // Snapbill app shell: bootstrap, routing, layout, guards, theme.
 import { h, icon, state, route, navigate, startRouter, currentPath, onRoute, toast, spinner, clear } from './lib.js';
-import { openDB, getSession, getBusiness, get } from './db.js';
+import { openDB, getSession, getBusiness, onAuthEvent, clearSession } from './db.js';
 import { setDisplayCurrency } from './format.js';
 
 // Screens
-import { welcomeScreen, registerScreen, loginScreen, recoverScreen, setupScreen } from './screens-auth.js';
+import { welcomeScreen, registerScreen, loginScreen, recoverScreen, resetPasswordScreen, setupScreen } from './screens-auth.js';
 import { dashboardScreen } from './screens-dashboard.js';
 import { invoicesScreen, invoiceDetailScreen, invoiceEditorScreen, invoicePreviewScreen } from './screens-invoices.js';
 import { customersScreen, customerDetailScreen, customerEditScreen } from './screens-customers.js';
@@ -96,6 +96,7 @@ function defineRoutes() {
   route('/login', () => publicMount(loginScreen));
   route('/register', () => publicMount(registerScreen));
   route('/recover', () => publicMount(recoverScreen));
+  route('/reset-password', async () => { await mount(resetPasswordScreen); });
   route('/setup', async () => { if (!state.account) return navigate('/welcome', { replace: true }); await mount(setupScreen); });
 
   // App
@@ -136,18 +137,21 @@ onRoute(updateNav);
 // ---------- Boot ----------
 async function boot() {
   applyTheme();
-  await openDB();
-  const sid = getSession();
-  if (sid) {
-    const acc = await get('accounts', sid);
+  try {
+    await openDB();
+    const acc = await getSession();
     if (acc) { const biz = await getBusiness(acc.id); state.set({ account: acc, business: biz }); if (biz) setDisplayCurrency(biz.currency || 'USD'); }
+  } catch (e) {
+    console.error(e);
+    toast('Could not reach the Snapbill backend — check your internet connection', 'error', 5000);
   }
   buildShell();
   defineRoutes();
 
   // Initial route
   const path = currentPath();
-  if (!state.account && !AUTH_ROUTES.includes(path.split('?')[0])) navigate('/welcome', { replace: true });
+  if (path.split('?')[0] === '/reset-password') { /* let the recovery-link route through untouched */ }
+  else if (!state.account && !AUTH_ROUTES.includes(path.split('?')[0])) navigate('/welcome', { replace: true });
   else if (state.account && !state.business && path !== '/setup') navigate('/setup', { replace: true });
   else if (path === '/' && !location.hash) navigate('/', { replace: true });
 
@@ -155,6 +159,12 @@ async function boot() {
 
   // React to auth changes (sign in/out) by refreshing nav
   state.subscribe(() => updateNav(currentPath()));
+
+  // Supabase fires 'PASSWORD_RECOVERY' when a user lands back via the emailed reset link.
+  onAuthEvent((event, acc) => {
+    if (event === 'PASSWORD_RECOVERY') { state.set({ account: acc }); navigate('/reset-password'); }
+    else if (event === 'SIGNED_OUT') { state.set({ account: null, business: null }); }
+  });
 
   // Register service worker for offline + install
   if ('serviceWorker' in navigator) {
@@ -168,8 +178,8 @@ async function boot() {
   }
 }
 
-// Online/offline indicator
-window.addEventListener('offline', () => toast('You are offline — changes are saved locally', 'info', 3000));
+// Online/offline indicator — Snapbill's data lives in the cloud, so saving/loading needs a connection.
+window.addEventListener('offline', () => toast('You are offline — reconnect to load or save data', 'warn', 3500));
 window.addEventListener('online', () => toast('Back online', 'success', 1800));
 
 boot();

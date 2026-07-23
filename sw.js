@@ -1,5 +1,5 @@
 // Snapbill service worker — app-shell caching for offline use + auto-update.
-const VERSION = 'snapbill-v1.1.0';
+const VERSION = 'snapbill-v1.2.0';
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
   './assets/icon-192.png', './assets/icon-512.png', './assets/apple-touch-icon.png', './assets/favicon-64.png',
@@ -7,7 +7,7 @@ const SHELL = [
   './js/intelligence.js', './js/invoice-doc.js', './js/seed.js', './js/screens-common.js',
   './js/screens-auth.js', './js/screens-dashboard.js', './js/screens-invoices.js',
   './js/screens-customers.js', './js/screens-catalog.js', './js/screens-insights.js', './js/screens-settings.js',
-  './js/vendor/jspdf.umd.min.js', './js/vendor/html2canvas.min.js',
+  './js/vendor/jspdf.umd.min.js', './js/vendor/html2canvas.min.js', './js/vendor/supabase.min.js',
 ];
 
 self.addEventListener('install', (e) => {
